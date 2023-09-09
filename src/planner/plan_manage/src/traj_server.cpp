@@ -1,7 +1,5 @@
 #include <ego_planner/TrajExecTime.h>
 #include <geometry_msgs/PoseStamped.h>
-#include <helper_funcs_eigen.h>
-#include <helper_funcs_ros.h>
 #include <ros/ros.h>
 #include <std_msgs/Float64.h>
 #include <tf/transform_broadcaster.h>
@@ -80,9 +78,59 @@ string planning_child_frame;
 float tfTimeOut;
 boost::shared_ptr<tf::TransformListener> mpTFListener = nullptr;
 
+template <typename T>
+inline void getParam(ros::NodeHandle &privateNode, const std::string &paramName,
+                     T &param) {
+  if (!privateNode.getParam(paramName, param)) {
+    ROS_ERROR_STREAM("Parameter " << paramName << " is not set.");
+    ROS_BREAK();
+  }
+
+  ROS_INFO_STREAM("Found parameter: " << paramName << ", value: " << param);
+}
+
+inline bool getTransform(const tf::TransformListener &TFListener,
+                         const std::string &target_frame,
+                         const std::string &source_frame, const ros::Time &time,
+                         const ros::Duration &timeout,
+                         tf::StampedTransform &transform,
+                         const bool quiet = false) {
+  if (TFListener.waitForTransform(target_frame, source_frame, time, timeout)) {
+    try {
+      TFListener.lookupTransform(target_frame, source_frame, time, transform);
+    } catch (tf::LookupException &ex) {
+      if (!quiet) {
+        ROS_WARN("no transform available: %s\n", ex.what());
+      }
+      return false;
+    } catch (tf::ConnectivityException &ex) {
+      if (!quiet) {
+        ROS_WARN("connectivity error: %s\n", ex.what());
+      }
+      return false;
+    } catch (tf::ExtrapolationException &ex) {
+      if (!quiet) {
+        ROS_WARN("extrapolation error: %s\n", ex.what());
+      }
+      return false;
+    }
+
+    return true;
+  }
+
+  if (!quiet) {
+    ROS_ERROR_STREAM(std::setprecision(9)
+                     << std::fixed << "transformation not available from "
+                     << source_frame << " to " << target_frame << " at "
+                     << time.toSec());
+  }
+
+  return false;
+}
+
 void getLatestPose(tf::StampedTransform &tf_Planning_PlanningChild,
                    Eigen::Vector3d &pos) {
-  if (!getTransform(mpTFListener, planning_frame, planning_child_frame,
+  if (!getTransform(*mpTFListener, planning_frame, planning_child_frame,
                     ros::Time(0), ros::Duration(tfTimeOut),
                     tf_Planning_PlanningChild)) {
     ROS_ERROR_STREAM("Transform not available in cmdCallback from "
@@ -587,6 +635,25 @@ void cmdCallback(const ros::TimerEvent &e) {
   time_last = time_now;
   last_yaw_ = yaw_yawdot.first;
   last_yaw_dot_ = yaw_yawdot.second;
+}
+
+void getRPYFromQuat(const Eigen::Quaterniond &quat, double &roll, double &pitch,
+                    double &yaw) {
+  tf::Matrix3x3 rot;
+  tf::matrixEigenToTF(quat.toRotationMatrix(), rot);
+
+  rot.getRPY(roll, pitch, yaw);
+}
+
+void getRPYFromQuat(const geometry_msgs::Quaternion &quat, double &roll,
+                    double &pitch, double &yaw) {
+  Eigen::Quaterniond eigQ;
+  eigQ.x() = quat.x;
+  eigQ.y() = quat.y;
+  eigQ.z() = quat.z;
+  eigQ.w() = quat.w;
+
+  getRPYFromQuat(eigQ, roll, pitch, yaw);
 }
 
 void odomCallback(const nav_msgs::OdometryConstPtr &msg) {
