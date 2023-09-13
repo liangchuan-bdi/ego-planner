@@ -1,9 +1,6 @@
 #include <ego_planner/TrajExecTime.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <ros/ros.h>
-#include <std_msgs/Float64.h>
-#include <tf/transform_broadcaster.h>
-#include <tf/transform_datatypes.h>
 #include <tf/transform_listener.h>
 #include <tf_conversions/tf_eigen.h>
 
@@ -19,9 +16,6 @@
 typedef enum {
   Cmd_None = 0,
   Cmd_BSpline = 1,
-  Cmd_Hover = 2,
-  Cmd_Turn = 3,
-  Cmd_BlindGoal = 4,
 } Cmd_Type;
 
 ros::Publisher pos_cmd_pub;
@@ -194,102 +188,6 @@ void bsplineCallback(ego_planner::BsplineConstPtr msg) {
   traj_duration_ = traj_[0].getTimeSum();
 
   cmd_type = Cmd_BSpline;
-  yawOffsetWasLarge = false;
-}
-
-void hoverCallback(std_msgs::Empty msg) {
-  if (cmd_type == Cmd_None) {
-    if (!hasOdom) {
-      return;
-    }
-
-    fastGoalLast_pos = odomPos;
-    fastGoalLast_yaw = odomYaw;
-  }
-
-  cmd_type = Cmd_Hover;
-  yawOffsetWasLarge = false;
-}
-
-void turnInPlaceCallback(const std_msgs::Float64::ConstPtr &msg) {
-  if (!hasOdom) {
-    return;
-  }
-
-  const double turnAngleDeg = msg->data;
-
-  if (turnAngleDeg > 0) {
-    ROS_INFO_STREAM("Turn left " << turnAngleDeg << " degrees");
-  } else {
-    ROS_INFO_STREAM("Turn right " << -turnAngleDeg << " degrees");
-  }
-
-  if (cmd_type == Cmd_None) {
-    // get latest pose
-    tf::StampedTransform tf_Planning_PlanningChild;
-    Eigen::Vector3d curPos;
-    getLatestPose(tf_Planning_PlanningChild, curPos);
-    const double yawCurrent =
-        tf::getYaw(tf_Planning_PlanningChild.getRotation());
-
-    turnInPlaceTargetPos = curPos;
-    turnInPlaceTargetYaw = yawCurrent + turnAngleDeg / 180.0 * M_PI;
-  } else {
-    turnInPlaceTargetPos = fastGoalLast_pos;
-    turnInPlaceTargetYaw = fastGoalLast_yaw + turnAngleDeg / 180.0 * M_PI;
-  }
-
-  cmd_type = Cmd_Turn;
-  yawOffsetWasLarge = false;
-}
-
-void blindGoalCallback(const nav_msgs::OdometryConstPtr &msg) {
-  if (cmd_type == Cmd_None) {
-    if (!hasOdom) {
-      return;
-    }
-
-    fastGoalLast_pos = odomPos;
-    fastGoalLast_yaw = odomYaw;
-  }
-
-  blindGoalTargetPos =
-      Eigen::Vector3d(msg->pose.pose.position.x, msg->pose.pose.position.y,
-                      msg->pose.pose.position.z);
-  blindGoalTargetSpeed = msg->twist.twist.linear.x;
-
-  // get latest pose
-  tf::StampedTransform tf_Planning_PlanningChild;
-  Eigen::Vector3d curPos;
-  getLatestPose(tf_Planning_PlanningChild, curPos);
-  const double yawCurrent = tf::getYaw(tf_Planning_PlanningChild.getRotation());
-
-  if (msg->pose.pose.orientation.w > 0.0) {
-    // yaw valid
-    if (cmd_type == Cmd_None) {
-      blindGoalTargetYaw =
-          yawCurrent + msg->pose.pose.orientation.x / 180.0 * M_PI;
-    } else {
-      blindGoalTargetYaw =
-          fastGoalLast_yaw + msg->pose.pose.orientation.x / 180.0 * M_PI;
-    }
-  } else {
-    // use direction to goal as yaw
-    // compute yaw
-    const Eigen::Vector3d blindGoalTargetDir =
-        (blindGoalTargetPos - curPos).normalized();
-    const double blindGoalTargetDis = (blindGoalTargetPos - curPos).norm();
-    blindGoalTargetYaw = blindGoalTargetDis > 0.2 ? atan2(blindGoalTargetDir(1),
-                                                          blindGoalTargetDir(0))
-                                                  : yawCurrent;
-  }
-
-  ROS_INFO_STREAM("Fly to goal blindly at "
-                  << blindGoalTargetPos.transpose() << " with speed "
-                  << blindGoalTargetSpeed << " m/s"
-                  << " heading " << blindGoalTargetYaw / M_PI * 180.0);
-
-  cmd_type = Cmd_BlindGoal;
   yawOffsetWasLarge = false;
 }
 
@@ -502,119 +400,6 @@ void cmdCallback(const ros::TimerEvent &e) {
       // pos_cmd_pub.publish(cmd);
     } break;
 
-    case Cmd_Hover: {
-      pos = fastGoalLast_pos;
-      yaw_yawdot.first = fastGoalLast_yaw;
-    } break;
-
-    case Cmd_Turn: {
-      // get latest pose
-      tf::StampedTransform tf_Planning_PlanningChild;
-      Eigen::Vector3d curPos;
-      getLatestPose(tf_Planning_PlanningChild, curPos);
-      const double yawCurrent =
-          tf::getYaw(tf_Planning_PlanningChild.getRotation());
-
-      bool yawOffsetLarge;
-      calculate_yaw_helper(turnInPlaceTargetYaw, yawCurrent, time_now,
-                           time_last, yawOffsetLarge, yaw_yawdot);
-
-      pos = turnInPlaceTargetPos;
-    }
-
-    break;
-
-    case Cmd_BlindGoal: {
-      // get latest pose
-      tf::StampedTransform tf_Planning_PlanningChild;
-      Eigen::Vector3d curPos;
-      getLatestPose(tf_Planning_PlanningChild, curPos);
-      const double yawCurrent =
-          tf::getYaw(tf_Planning_PlanningChild.getRotation());
-
-      // compute yaw
-      const Eigen::Vector3d blindGoalTargetDir =
-          (blindGoalTargetPos - curPos).normalized();
-      const double blindGoalTargetDis = (blindGoalTargetPos - curPos).norm();
-
-      bool yawOffsetLarge;
-      calculate_yaw_helper(blindGoalTargetYaw, yawCurrent, time_now, time_last,
-                           yawOffsetLarge, yaw_yawdot);
-
-      // compute pos
-      if (yawOffsetLarge) {
-        // turn in place
-        pos = fastGoalLast_pos;
-      } else if (blindGoalTargetDis < blind_goal_plan_ahead_dis_min) {
-        // hover
-        pos = blindGoalTargetPos;
-      } else {
-        // speed control
-        const double curLinearSpeed = curSpeed.norm();
-        const double dt = (time_now - time_last).toSec();
-
-        double targetSpeed = blindGoalTargetSpeed;
-        double slow_down_dis = 3.0 * curLinearSpeed;
-
-        if (slow_down_dis < blind_goal_slow_down_dis) {
-          slow_down_dis = blind_goal_slow_down_dis;
-        }
-
-        if (blindGoalTargetDis < slow_down_dis) {
-          targetSpeed =
-              blindGoalTargetDis / slow_down_dis * blindGoalTargetSpeed * 0.5;
-        }
-
-        double blind_goal_plan_ahead_dis_cur =
-            (fastGoalLast_pos - curPos).norm();
-
-        double blind_goal_plan_ahead_dis_step = (targetSpeed - curLinearSpeed) /
-                                                targetSpeed *
-                                                blind_goal_plan_ahead_dis_cur;
-
-        const double blind_goal_plan_ahead_dis_step_change_max =
-            blind_goal_plan_ahead_dis_step_change_rate_max * dt;
-
-        if (blind_goal_plan_ahead_dis_step >
-            blind_goal_plan_ahead_dis_step_change_max) {
-          blind_goal_plan_ahead_dis_step =
-              blind_goal_plan_ahead_dis_step_change_max;
-        } else if (blind_goal_plan_ahead_dis_step <
-                   -blind_goal_plan_ahead_dis_step_change_max) {
-          blind_goal_plan_ahead_dis_step =
-              -blind_goal_plan_ahead_dis_step_change_max;
-        }
-
-        blind_goal_plan_ahead_dis_cur += blind_goal_plan_ahead_dis_step;
-
-        if (blind_goal_plan_ahead_dis_cur < blind_goal_plan_ahead_dis_min) {
-          blind_goal_plan_ahead_dis_cur = blind_goal_plan_ahead_dis_min;
-        }
-
-        if (blind_goal_plan_ahead_dis_cur > blind_goal_plan_ahead_dis_max) {
-          blind_goal_plan_ahead_dis_cur = blind_goal_plan_ahead_dis_max;
-        }
-
-        if (blind_goal_plan_ahead_dis_cur > blindGoalTargetDis) {
-          blind_goal_plan_ahead_dis_cur = blindGoalTargetDis;
-        }
-
-        // ROS_WARN_STREAM("Cur speed: " << curLinearSpeed
-        //                               << " Target speed: " << targetSpeed);
-        // ROS_WARN_STREAM("blind_goal_plan_ahead_dis_step_change_max: "
-        //                 << blind_goal_plan_ahead_dis_step_change_max
-        //                 << " blind_goal_plan_ahead_dis_step: "
-        //                 << blind_goal_plan_ahead_dis_step
-        //                 << " blind_goal_plan_ahead_dis_cur: "
-        //                 << blind_goal_plan_ahead_dis_cur);
-
-        pos = curPos + blindGoalTargetDir * (curLinearSpeed * dt +
-                                             blind_goal_plan_ahead_dis_cur);
-      }
-    }
-
-    break;
-
     default:
       break;
   }
@@ -627,10 +412,6 @@ void cmdCallback(const ros::TimerEvent &e) {
   fastGoal.pose.orientation = tf::createQuaternionMsgFromYaw(yaw_yawdot.first);
   fast_goal_pub.publish(fastGoal);
 
-  // record for hover
-  fastGoalLast_pos = pos;
-  fastGoalLast_yaw = yaw_yawdot.first;
-
   // record for yaw control
   time_last = time_now;
   last_yaw_ = yaw_yawdot.first;
@@ -641,10 +422,8 @@ void getRPYFromQuat(const Eigen::Quaterniond &quat, double &roll, double &pitch,
                     double &yaw) {
   tf::Matrix3x3 rot;
   tf::matrixEigenToTF(quat.toRotationMatrix(), rot);
-
   rot.getRPY(roll, pitch, yaw);
 }
-
 void getRPYFromQuat(const geometry_msgs::Quaternion &quat, double &roll,
                     double &pitch, double &yaw) {
   Eigen::Quaterniond eigQ;
@@ -652,7 +431,6 @@ void getRPYFromQuat(const geometry_msgs::Quaternion &quat, double &roll,
   eigQ.y() = quat.y;
   eigQ.z() = quat.z;
   eigQ.w() = quat.w;
-
   getRPYFromQuat(eigQ, roll, pitch, yaw);
 }
 
@@ -660,18 +438,14 @@ void odomCallback(const nav_msgs::OdometryConstPtr &msg) {
   odomPos[0] = msg->pose.pose.position.x;
   odomPos[1] = msg->pose.pose.position.y;
   odomPos[2] = msg->pose.pose.position.z;
-
   double odomRoll, odomPitch;
   getRPYFromQuat(msg->pose.pose.orientation, odomRoll, odomPitch, odomYaw);
-
   curSpeed =
       Eigen::Vector3d(msg->twist.twist.linear.x, msg->twist.twist.linear.y,
                       msg->twist.twist.linear.z);
-
   if (!hasOdom) {
     last_yaw_ = odomYaw;
   }
-
   hasOdom = true;
 }
 
@@ -682,12 +456,6 @@ int main(int argc, char **argv) {
 
   ros::Subscriber bspline_sub =
       node.subscribe("planning/bspline", 10, bsplineCallback);
-  ros::Subscriber hover_sub =
-      node.subscribe("traj_server/hover", 10, hoverCallback);
-  ros::Subscriber turn_in_place_sub =
-      node.subscribe("traj_server/turn_in_place", 10, turnInPlaceCallback);
-  ros::Subscriber blind_goal_sub =
-      node.subscribe("traj_server/blind_goal", 10, blindGoalCallback);
   ros::Subscriber odom_sub =
       node.subscribe("/mavros/local_position/odom", 10, odomCallback);
 
